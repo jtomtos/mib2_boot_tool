@@ -6,7 +6,7 @@ import re
 import argparse
 import subprocess
 
-def install_and_import(package):
+def install_and_import(package, shortname = None):
     """Checks if a package is installed and prompts the user to install it if missing."""
     try:
         __import__(package)
@@ -38,6 +38,22 @@ install_and_import("PIL")
 import zlib
 import numpy as np
 from PIL import Image, ImageOps
+
+
+COLOR_MATRICES = {
+    "identity": np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+    "technisat_fix": np.array([
+        [1.15, -0.05, -0.05],
+        [-0.02, 0.98, -0.02],
+        [-0.05, -0.05, 1.20]
+    ]),
+    "vivid": np.array([
+        [1.2, -0.1, -0.1],
+        [-0.1, 1.2, -0.1],
+        [-0.1, -0.1, 1.2]
+    ]),
+}
+
 
 # ==============================================================================
 #                          PACK MODE (PACK)
@@ -86,12 +102,36 @@ def encode_rgb_to_mib2(img_path, is_premultiplied=False, color_bits=None):
         r, g, b = rgb_array[:,:,0], rgb_array[:,:,1], rgb_array[:,:,2]
         alpha_out = None
 
-    co = r - g
-    cg = b - g
+    #raw
+    #co = r - g
+    #cg = b - g
+    #y = g 
+    
+    #BT.601     
+    #y = 16 + 65.481 * r + 128.553 * g + 24.966 * b
+    #cg = 128 - 37.797 * r - 74.203 * g + 112.000 * b
+    #co = 128 + 112.000 * r - 93.786 * g - 18.214 * b 
+
+    #BT.709     
+    #y = 16 + 46.559 * r + 156.629 * g + 15.812 * b
+    #cg = 128 - 25.664 * r - 86.336 * g + 112.000 * b
+    #co = 128 - 112.000 * r - 101.737 * g - 10.263 * b 
+
+    #BT.601 FR    
+    #y = 0.299 * r + 0.587 * g + 0.114 * b
+    #cg = -0.1687 * r - 0.3313 * g + 0.5 * b
+    #co = 0.5 * r - 0.4187 * g - 0.0813 * b 
+
+    #BT.709 FR    
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    cg = -0.1146 * r - 0.3854 * g + 0.5 * b
+    co = 0.5 * r - 0.4542 * g - 0.0458 * b 
+    
+    
     px = np.zeros_like(g, dtype=np.uint8)
     px[:, 0::2] = np.clip(cg[:, 0::2] + 128, 0, 255)
     px[:, 1::2] = np.clip(co[:, 1::2] + 128, 0, 255)
-    g_out = np.clip(g, 0, 255).astype(np.uint8)
+    g_out = np.clip(y, 0, 255).astype(np.uint8)
 
     if is_premultiplied:
         px = alpha_out
@@ -315,9 +355,30 @@ def load_mib2_to_rgb(width, height, decompressed_bytes, is_premultiplied=False):
     if width % 2 == 0:
         co_raw[:, -2] = co_raw[:, -1]
 
-    r = (g + co_raw).astype(np.float32)
-    b = (g + cg_raw).astype(np.float32)
-    g_final = g.astype(np.float32)
+    # raw
+    #r = (g + co_raw).astype(np.float32)
+    #b = (g + cg_raw).astype(np.float32)
+    #g_final = g.astype(np.float32)
+
+    # BT.601
+    #r = (1.164 * (g - 16)+1.596 * (co_raw)).astype(np.float32)
+    #g_final = (1.164 * (g - 16) - 0.392 * (cg_raw) - 0.813 * (co_raw)).astype(np.float32)
+    #b = (1.164 * (g - 16) + 2.017 * (cg_raw)).astype(np.float32)
+    
+    # BT.601 FR
+    #r = (g + 1.402 * (co_raw)).astype(np.float32)
+    #g_final = ((g) - 0.34414 * (cg_raw) - 0.71414 * (co_raw)).astype(np.float32)
+    #b = (g + 1.772 * (cg_raw)).astype(np.float32)
+
+    # BT.709 
+    #r = (1.164 * (g - 16) + 1.793 * (co_raw - 128)).astype(np.float32)
+    #g_final = (1.164 * (g - 16) - 0.213 * (cg_raw) - 0.533 * (co_raw)).astype(np.float32)
+    #b = (1.164 * (g - 16) + 2.112 * (cg_raw)).astype(np.float32)
+
+    # BT.709 FR
+    r = (g + 1.5748 * (co_raw)).astype(np.float32)
+    g_final = (g - 0.1873 * (cg_raw) - 0.4681 * (co_raw)).astype(np.float32)
+    b = (g + 1.8556 * (cg_raw)).astype(np.float32)
 
     if is_premultiplied:
         alpha_mask = px.astype(np.float32) / 255.0
@@ -333,6 +394,7 @@ def load_mib2_to_rgb(width, height, decompressed_bytes, is_premultiplied=False):
 
     rgb_data = np.clip(rgb_data, 0, 255).astype(np.uint8)
     return Image.fromarray(rgb_data, mode)
+
 
 def unpack_boot(filename, out_dir):
     """Decompiles a binary .boot file, extracting the script and PNG assets."""
