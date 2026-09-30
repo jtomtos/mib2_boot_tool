@@ -149,18 +149,20 @@ def parse_high_level_script(script_path):
         'end': re.compile(r'(?i)end\(\)'),
         'clear': re.compile(r'(?i)clear_screen\(\s*\)'),
         'resolution': re.compile(r'(?i)set_resolution\(\s*(\d*)\s*,\s*(\d*)\s*\)'),
-        'draw_bg': re.compile(r'(?i)draw_bg\(\s*([a-zA-Z0-9_\-]+)\s*,\s*x\s*=\s*(-?\d*)\s*,\s*y\s*=\s*(-?\d*)\s*\)'),
+        'draw_bg': re.compile(
+            r'(?i)draw_bg\(\s*([a-zA-Z0-9_\-]+)\s*,\s*'
+            r'(?:x\s*=)?\s*(-?\d*)\s*,\s*'
+            r'(?:y\s*=)?\s*(-?\d*)\s*\)'),
         'draw_sticker': re.compile(
             r'(?i)draw_sticker\s*\(\s*([a-zA-Z0-9_\-]+)\s*,\s*'
-            r'x\s*=\s*(-?\d*)\s*,\s*'
-            r'y\s*=\s*(-?\d*)\s*,\s*'
-            r'blend_mode\s*=\s*(\d*)\s*,\s*'
-            r'z_index\s*=\s*(-?\d*)\s*,\s*'
-            r'frame_buffer\s*=\s*(-?\d*)\s*\)'
+            r'(?:x\s*=)?\s*(-?\d*)\s*,\s*'
+            r'(?:y\s*=)?\s*(-?\d*)\s*,\s*'
+            r'(?:z_index\s*=)?\s*(-?\d*)\s*,\s*'
+            r'(?:mode\s*=)?\s*\[\s*((?:dmOver\s*,\s*bmAlpha|bmAlpha\s*,\s*dmOver|dmOver|bmAlpha)?)\s*\]\s*\)'
         ),
         'wait': re.compile(r'(?i)wait\s*\(\s*(\d+\.?\d*)\s*\)'),
         'start_anim': re.compile(r'(?i)start_animation\(\s*\)'),
-        'if_stmt': re.compile(r'(?i)if\s+STICKER\s+==\s+(\d+)\s*:'),
+        'if_stmt': re.compile(r'(?i)if_default\s*:'),
         'else_stmt': re.compile(r'(?i)else:'),
         'endif_stmt': re.compile(r'(?i)endif'),
         'set_id': re.compile(r'(?i)set\s+animation\s+id\s*=\s*(\d+)'),
@@ -198,7 +200,8 @@ def parse_high_level_script(script_path):
                         boot_id = int(m.group(1))
                         skip = True
                     elif key == 'begin': cmd = 0
-                    elif key == 'end': cmd = 1
+                    elif key == 'end': 
+                        cmd = 1
                     elif key == 'clear': cmd = 2
                     elif key == 'resolution':
                         cmd = 3
@@ -212,18 +215,18 @@ def parse_high_level_script(script_path):
                         arg1 = get_image_id(m.group(1))
                         arg3 = to_sys_int(m.group(2))
                         arg4 = to_sys_int(m.group(3))
-                        arg2 = to_sys_int(m.group(4))
-                        arg5 = to_sys_int(m.group(5))
-                        arg6 = to_sys_int(m.group(6))
-                        if arg2 == 19:
-                            premultiplied_images.add(arg1)
+                        arg5 = to_sys_int(m.group(4))                        
+                        arg6 = 2 if (m.group(5) and "bmAlpha" in m.group(5)) else 13
+                        arg2 = 19 if (m.group(5) and "dmOver" in m.group(5)) else 17
                     elif key == 'wait':
                         cmd = 6
                         arg1 = int(float(m.group(1)) * 100)
                     elif key == 'start_anim': cmd = 7
                     elif key == 'if_stmt':
                         cmd = 10
-                        arg2 = int(m.group(1))
+                        arg1 = 19
+                        arg2 = 0
+                        arg6 = 2
                     elif key == 'else_stmt': cmd = 11
                     elif key == 'endif_stmt': cmd = 12
                     break
@@ -417,8 +420,8 @@ def unpack_boot(filename, out_dir):
         block = struct.unpack_from('<IIIIIIII', data, cmd_offset)
         commands.append(block)
         nn, cmd, arg1, arg2, arg3, arg4, arg5, arg6 = block
-        if cmd == 5 and arg2 == 19:
-            premultiplied_images.add(arg1)
+        #if cmd == 5 and arg2 == 19:
+        #    premultiplied_images.add(arg1)
         cmd_offset += 32
 
     script_path = os.path.join(out_dir, 'script.txt')
@@ -445,10 +448,10 @@ def unpack_boot(filename, out_dir):
                 case 2: line_str = f"clear_screen()"
                 case 3: line_str = f"set_resolution({fmt_z(arg3)}, {fmt_z(arg4)})"
                 case 4: line_str = f"draw_bg(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)})"
-                case 5: line_str = f"draw_sticker(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)}, blend_mode={fmt_z(arg2)}, z_index={fmt_z(arg5)}, frame_buffer={fmt_z(arg6)})"
+                case 5: line_str = f"draw_sticker(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)}, z_index={fmt_z(arg5)}, mode=[{','.join(([ 'dmOver' ] if fmt_z(arg2) == "19" else []) + ([ 'bmAlpha' ] if fmt_z(arg6) == "2" else []))}])"
                 case 6: line_str = f"wait({arg1*0.01:.2f})"
                 case 7: line_str = f"start_animation()"
-                case 10: line_str = f"if STICKER == {fmt_z(arg2)}:"
+                case 10: line_str = f"if_default:"
                 case 11: line_str = f"else:"
                 case 12: line_str = f"endif"
                 case _: line_str = f"unknown_command_{cmd}(args={fmt_z(arg1)},{fmt_z(arg2)},{fmt_z(arg3)},{fmt_z(arg4)},{fmt_z(arg5)},{fmt_z(arg6)})"
@@ -462,6 +465,8 @@ def unpack_boot(filename, out_dir):
     img_offset += 8
     
     offset_array = [struct.unpack_from('<I', data, img_offset + (i * 4))[0] for i in range(num_files)]
+
+    print(f"[+] TOC:")
 
     for j in range(num_files):
         offset = offset_array[j]
