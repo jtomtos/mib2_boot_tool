@@ -336,6 +336,23 @@ def pack_boot(folder_path, output_boot_name, color_bits=None):
 def load_mib2_to_rgb(width, height, decompressed_bytes, is_premultiplied=False):
     """Decodes raw MIB2 bytes (GRAYA) back into a standard PNG image."""
     # Convert to int32 immediately to prevent uint8 underflow/overflow during math operations
+    
+    if width == 1 and height == 1:
+        return Image.frombuffer('LA', (width, height), decompressed_bytes, 'raw')
+    
+    # РЕШЕНИЕ ПРОБЛЕМЫ: Вычисляем точный целевой размер массива в байтах
+    expected_size = height * width * 2
+    
+    # Если распакованный массив больше (например, 6428 вместо 6426), 
+    # мы берем только первые нужные байты, отсекая технический хвост выравнивания
+    if len(decompressed_bytes) > expected_size:
+        decompressed_bytes = decompressed_bytes[:expected_size]
+    elif len(decompressed_bytes) < expected_size:
+        raise ValueError(
+            f"Error: Decompressed data size ({len(decompressed_bytes)} B) "
+            f"is less than expected ({expected_size} B) for {width}x{height} image."
+        )
+    
     raw_data = np.frombuffer(decompressed_bytes, dtype=np.uint8).reshape((height, width, 2))
     data = raw_data.astype(np.int32)
     
