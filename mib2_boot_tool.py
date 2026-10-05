@@ -65,11 +65,11 @@ def encode_rgb_to_mib2(img_path, is_premultiplied=False, color_bits=None):
         width, height = img.size
 
         # Geometry validation
-        if width % 2 != 0:
-            raise ValueError(
-                f"Critical error in file {os.path.basename(img_path)}: "
-                f"Width ({width}px) MUST be even! This will break the chroma subsampling algorithm."
-            )
+        #if width % 2 != 0:
+        #    raise ValueError(
+        #        f"Critical error in file {os.path.basename(img_path)}: "
+        #        f"Width ({width}px) MUST be even! This will break the chroma subsampling algorithm."
+        #    )
         
         if is_premultiplied:
             if img.mode != "RGBA":
@@ -137,7 +137,16 @@ def encode_rgb_to_mib2(img_path, is_premultiplied=False, color_bits=None):
         px = alpha_out
 
     dest_main = np.stack([px, g_out], axis=-1)
-    return width, height, dest_main.tobytes()
+    raw_bytes = dest_main.tobytes()
+    clean_size = height * width * 2
+    
+    # Pad byte insertion for odd-width sticker alignments
+    if width % 2 != 0:
+        padding_bytes = b'\x00\x00'
+        raw_bytes = raw_bytes + padding_bytes
+    return width, height, raw_bytes
+    
+    
 
 def parse_high_level_script(script_path):
     """Parses a high-level text animation script into binary opcodes."""
@@ -161,7 +170,7 @@ def parse_high_level_script(script_path):
             r'(?:mode\s*=)?\s*\[\s*((?:dmOver\s*,\s*bmAlpha|bmAlpha\s*,\s*dmOver|dmOver|bmAlpha)?)\s*\]\s*\)'
         ),
         'wait': re.compile(r'(?i)wait\s*\(\s*(\d+\.?\d*)\s*\)'),
-        'start_anim': re.compile(r'(?i)start_animation\(\s*\)'),
+        'sync_frame': re.compile(r'(?i)sync_frame\(\s*\)'),
         'if_stmt': re.compile(r'(?i)if_default\s*:'),
         'else_stmt': re.compile(r'(?i)else:'),
         'endif_stmt': re.compile(r'(?i)endif'),
@@ -221,7 +230,7 @@ def parse_high_level_script(script_path):
                     elif key == 'wait':
                         cmd = 6
                         arg1 = int(float(m.group(1)) * 100)
-                    elif key == 'start_anim': cmd = 7
+                    elif key == 'sync_frame': cmd = 7
                     elif key == 'if_stmt':
                         cmd = 10
                         arg1 = 19
@@ -337,14 +346,8 @@ def load_mib2_to_rgb(width, height, decompressed_bytes, is_premultiplied=False):
     """Decodes raw MIB2 bytes (GRAYA) back into a standard PNG image."""
     # Convert to int32 immediately to prevent uint8 underflow/overflow during math operations
     
-    if width == 1 and height == 1:
-        return Image.frombuffer('LA', (width, height), decompressed_bytes, 'raw')
-    
-    # РЕШЕНИЕ ПРОБЛЕМЫ: Вычисляем точный целевой размер массива в байтах
     expected_size = height * width * 2
     
-    # Если распакованный массив больше (например, 6428 вместо 6426), 
-    # мы берем только первые нужные байты, отсекая технический хвост выравнивания
     if len(decompressed_bytes) > expected_size:
         decompressed_bytes = decompressed_bytes[:expected_size]
     elif len(decompressed_bytes) < expected_size:
@@ -358,47 +361,53 @@ def load_mib2_to_rgb(width, height, decompressed_bytes, is_premultiplied=False):
     
     px = data[:, :, 0]
     g = data[:, :, 1]
+
+    if width == 1 or height == 1:
+        r = g.astype(np.float32)
+        g_final = g.astype(np.float32)
+        b = g.astype(np.float32)
+    else:    
     
-    # Secure subtraction, values will correctly go into signed negative range
-    chroma_delta = px - 128
+        # Secure subtraction, values will correctly go into signed negative range
+        chroma_delta = px - 128
 
-    cg_raw = np.zeros_like(chroma_delta, dtype=np.float32)
-    co_raw = np.zeros_like(chroma_delta, dtype=np.float32)
-    cg_raw[:, 0::2] = chroma_delta[:, 0::2]
-    co_raw[:, 1::2] = chroma_delta[:, 1::2]
+        cg_raw = np.zeros_like(chroma_delta, dtype=np.float32)
+        co_raw = np.zeros_like(chroma_delta, dtype=np.float32)
+        cg_raw[:, 0::2] = chroma_delta[:, 0::2]
+        co_raw[:, 1::2] = chroma_delta[:, 1::2]
 
-    # Bilinear chroma component interpolation
-    cg_raw[:, 1:-1:2] = (cg_raw[:, 0:-2:2] + cg_raw[:, 2::2]) / 2.0
-    cg_raw[:, -1] = cg_raw[:, -2]
-    co_raw[:, 2:-1:2] = (co_raw[:, 1:-2:2] + co_raw[:, 3::2]) / 2.0
-    co_raw[:, 0] = co_raw[:, 1]
-    if width % 2 == 0:
-        co_raw[:, -2] = co_raw[:, -1]
+        # Bilinear chroma component interpolation
+        cg_raw[:, 1:-1:2] = (cg_raw[:, 0:-2:2] + cg_raw[:, 2::2]) / 2.0
+        cg_raw[:, -1] = cg_raw[:, -2]
+        co_raw[:, 2:-1:2] = (co_raw[:, 1:-2:2] + co_raw[:, 3::2]) / 2.0
+        co_raw[:, 0] = co_raw[:, 1]
+        if width % 2 == 0:
+            co_raw[:, -2] = co_raw[:, -1]
 
-    # raw
-    #r = (g + co_raw).astype(np.float32)
-    #b = (g + cg_raw).astype(np.float32)
-    #g_final = g.astype(np.float32)
+        # raw
+        #r = (g + co_raw).astype(np.float32)
+        #b = (g + cg_raw).astype(np.float32)
+        #g_final = g.astype(np.float32)
 
-    # BT.601
-    #r = (1.164 * (g - 16)+1.596 * (co_raw)).astype(np.float32)
-    #g_final = (1.164 * (g - 16) - 0.392 * (cg_raw) - 0.813 * (co_raw)).astype(np.float32)
-    #b = (1.164 * (g - 16) + 2.017 * (cg_raw)).astype(np.float32)
-    
-    # BT.601 FR
-    #r = (g + 1.402 * (co_raw)).astype(np.float32)
-    #g_final = ((g) - 0.34414 * (cg_raw) - 0.71414 * (co_raw)).astype(np.float32)
-    #b = (g + 1.772 * (cg_raw)).astype(np.float32)
+        # BT.601
+        #r = (1.164 * (g - 16)+1.596 * (co_raw)).astype(np.float32)
+        #g_final = (1.164 * (g - 16) - 0.392 * (cg_raw) - 0.813 * (co_raw)).astype(np.float32)
+        #b = (1.164 * (g - 16) + 2.017 * (cg_raw)).astype(np.float32)
+        
+        # BT.601 FR
+        #r = (g + 1.402 * (co_raw)).astype(np.float32)
+        #g_final = ((g) - 0.34414 * (cg_raw) - 0.71414 * (co_raw)).astype(np.float32)
+        #b = (g + 1.772 * (cg_raw)).astype(np.float32)
 
-    # BT.709 
-    #r = (1.164 * (g - 16) + 1.793 * (co_raw - 128)).astype(np.float32)
-    #g_final = (1.164 * (g - 16) - 0.213 * (cg_raw) - 0.533 * (co_raw)).astype(np.float32)
-    #b = (1.164 * (g - 16) + 2.112 * (cg_raw)).astype(np.float32)
+        # BT.709 
+        #r = (1.164 * (g - 16) + 1.793 * (co_raw - 128)).astype(np.float32)
+        #g_final = (1.164 * (g - 16) - 0.213 * (cg_raw) - 0.533 * (co_raw)).astype(np.float32)
+        #b = (1.164 * (g - 16) + 2.112 * (cg_raw)).astype(np.float32)
 
-    # BT.709 FR
-    r = (g + 1.5748 * (co_raw)).astype(np.float32)
-    g_final = (g - 0.1873 * (cg_raw) - 0.4681 * (co_raw)).astype(np.float32)
-    b = (g + 1.8556 * (cg_raw)).astype(np.float32)
+        # BT.709 FR
+        r = (g + 1.5748 * (co_raw)).astype(np.float32)
+        g_final = (g - 0.1873 * (cg_raw) - 0.4681 * (co_raw)).astype(np.float32)
+        b = (g + 1.8556 * (cg_raw)).astype(np.float32)
 
     if is_premultiplied:
         alpha_mask = px.astype(np.float32) / 255.0
@@ -441,39 +450,44 @@ def unpack_boot(filename, out_dir):
         #    premultiplied_images.add(arg1)
         cmd_offset += 32
 
-    script_path = os.path.join(out_dir, 'script.txt')
-    indent = 0
-    with open(script_path, 'w', encoding='utf-8') as f:
-        f.write("# MIB2 Boot Animation Script\n")
-        f.write(f"set animation id={str(boot_id)}\n")
-        for block in commands:
-            nn, cmd, arg1, arg2, arg3, arg4, arg5, arg6 = block
-            
-            if cmd in (1, 11, 12):  # 1: end, 11: else, 12: endif
-                indent = max(0, indent - 4)
-            
-            space = " " * indent
-            
-            if cmd in (0, 10, 11):  # 0: begin, 10: if, 11: else
-                indent += 4
+    toc_path = os.path.join(out_dir, 'commands.csv')
+    with open(toc_path, 'w', encoding='utf-8') as tf:
+        tf.write("nn,cmd,arg1,arg2,arg3,arg4,arg5,arg6\n")
+        script_path = os.path.join(out_dir, 'script.txt')
+        indent = 0
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write("# MIB2 Boot Animation Script\n")
+            f.write(f"set animation id={str(boot_id)}\n")
+            for block in commands:
+                nn, cmd, arg1, arg2, arg3, arg4, arg5, arg6 = block
+                
+                tf.write(f"{nn},{cmd},{arg1},{arg2},{arg3},{arg4},{arg5},{arg6}\n")
+                
+                if cmd in (1, 11, 12):  # 1: end, 11: else, 12: endif
+                    indent = max(0, indent - 4)
+                
+                space = " " * indent
+                
+                if cmd in (0, 10, 11):  # 0: begin, 10: if, 11: else
+                    indent += 4
 
-            fmt_z = lambda x: "" if x == 4294967295 else str(x)
+                fmt_z = lambda x: "" if x == 4294967295 else str(x)
 
-            match cmd:
-                case 0: line_str = f"begin()"
-                case 1: line_str = f"end()"
-                case 2: line_str = f"clear_screen()"
-                case 3: line_str = f"set_resolution({fmt_z(arg3)}, {fmt_z(arg4)})"
-                case 4: line_str = f"draw_bg(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)})"
-                case 5: line_str = f"draw_sticker(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)}, z_index={fmt_z(arg5)}, mode=[{','.join(([ 'dmOver' ] if fmt_z(arg2) == "19" else []) + ([ 'bmAlpha' ] if fmt_z(arg6) == "2" else []))}])"
-                case 6: line_str = f"wait({arg1*0.01:.2f})"
-                case 7: line_str = f"start_animation()"
-                case 10: line_str = f"if_default:"
-                case 11: line_str = f"else:"
-                case 12: line_str = f"endif"
-                case _: line_str = f"unknown_command_{cmd}(args={fmt_z(arg1)},{fmt_z(arg2)},{fmt_z(arg3)},{fmt_z(arg4)},{fmt_z(arg5)},{fmt_z(arg6)})"
-            
-            f.write(f"{space}{line_str} # ID={nn}\n")
+                match cmd:
+                    case 0: line_str = f"begin()"
+                    case 1: line_str = f"end()"
+                    case 2: line_str = f"clear_screen()"
+                    case 3: line_str = f"set_resolution({fmt_z(arg3)}, {fmt_z(arg4)})"
+                    case 4: line_str = f"draw_bg(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)})"
+                    case 5: line_str = f"draw_sticker(img_{str(arg1).zfill(2)}, x={fmt_z(arg3)}, y={fmt_z(arg4)}, z_index={fmt_z(arg5)}, mode=[{','.join(([ 'dmOver' ] if fmt_z(arg2) == "19" else []) + ([ 'bmAlpha' ] if fmt_z(arg6) == "2" else []))}])"
+                    case 6: line_str = f"wait({arg1*0.01:.2f})"
+                    case 7: line_str = f"sync_frame()"
+                    case 10: line_str = f"if_default:"
+                    case 11: line_str = f"else:"
+                    case 12: line_str = f"endif"
+                    case _: line_str = f"unknown_command_{cmd}(args={fmt_z(arg1)},{fmt_z(arg2)},{fmt_z(arg3)},{fmt_z(arg4)},{fmt_z(arg5)},{fmt_z(arg6)})"
+                
+                f.write(f"{space}{line_str} # ID={nn}\n")
 
     print(f"[+] Animation script saved: {script_path}")
 
@@ -499,11 +513,11 @@ def unpack_boot(filename, out_dir):
         zlib_image = data[offset:offset + zsize]
         
         try:
-            decompressed = zlib.decompress(zlib_image)
-        except zlib.error:
             # Safe fall-back chunk parsing to discard container metadata trailing padding
             dec = zlib.decompressobj()
             decompressed = dec.decompress(zlib_image)
+        except zlib.error:
+            decompressed = zlib.decompress(zlib_image)
         
         is_prem = j in premultiplied_images
         img_res = load_mib2_to_rgb(width, height, decompressed, is_premultiplied=is_prem)
